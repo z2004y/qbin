@@ -60,7 +60,7 @@ export async function getRaw(ctx: Context<AppState>) {
   ctx.response.headers.set("Cache-Control", "no-cache, must-revalidate");  // private , must-revalidate | , max-age=3600
   ctx.response.headers.set("Content-Type", full.mime);
   ctx.response.headers.set("Content-Length", full.len.toString());
-  if(full.title) ctx.response.headers.set("Content-Disposition", `inline; filename="${full.title}"`);
+  if(full.title) ctx.response.headers.set("Content-Disposition", `inline; filename="${encodeURIComponent(full.title)}"`);
   ctx.response.body = full.content;
 }
 
@@ -80,7 +80,7 @@ export async function queryRaw(ctx: Context<AppState>) {
   ctx.response.status = 200;
   ctx.response.headers.set("Content-Type", meta.mime);
   ctx.response.headers.set("Content-Length", meta.len.toString());
-  if(meta.title) ctx.response.headers.set("Content-Disposition", `inline; filename="${meta.title}"`);
+  if(meta.title) ctx.response.headers.set("Content-Disposition", `inline; filename="${encodeURIComponent(meta.title)}"`);
 }
 
 /** POST/PUT /save/:key/:pwd? 统一入口：若 key 已存在则更新，否则创建 */
@@ -270,8 +270,18 @@ async function assembleMetadata(
 ): Promise<Metadata> {
   const req = ctx.request;
   const headers = req.headers;
-  // const title = decodeURIComponent(headers.get("x-title") || "");
-  const title = headers.get("x-title") || "";
+  // 前端传的是 encodeURIComponent 后的文件名；解码还原真实文件名
+  let title = headers.get("x-title") || "";
+  try {
+    title = decodeURIComponent(title);
+  } catch {
+    // 明文 title（无 % 编码）保持原样
+  }
+  // 截断到数据库 varchar(255) 允许长度，避免插入报错 "value too long"
+  // （encodeURIComponent 会对每个中文字符展开约 3 倍）
+  if (title.length > 255) title = title.slice(0, 255);
+  // 清理可能破坏 Content-Disposition / 表头的字符
+  title = title.replace(/["\r\n]/g, "");
   const len = +headers.get("Content-Length")!;
   if (len > MAX_UPLOAD_FILE_SIZE) {
     throw new Response(ctx, 413, ResponseMessages.CONTENT_TOO_LARGE);
