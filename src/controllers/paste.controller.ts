@@ -188,23 +188,22 @@ async function createNew(
     return new Response(ctx, 409, ResponseMessages.KEY_EXISTS);
   }
 
-  // 写入缓存
-  await updateCache(key, metadata);
-
-  queueMicrotask(async () => {
-    try {
-      const result = await repo.create(metadata);
-      if (!result) {
-        console.warn('Failed to create in repo, metadata:', key);
-        await deleteCache(key, metadata);
-        await kv.delete([PASTE_STORE, key]);
-      }
-    } catch (err) {
-      console.error(err);
-      await deleteCache(key, metadata);
+  // 先落库（await，保证返回 200 时数据已持久化，避免跨实例读取时的竞态 404）
+  try {
+    const result = await repo.create(metadata);
+    if (!result) {
+      console.warn('Failed to create in repo, metadata:', key);
       await kv.delete([PASTE_STORE, key]);
+      return new Response(ctx, 500, ResponseMessages.SERVER_ERROR);
     }
-  });
+  } catch (err) {
+    console.error(err);
+    await kv.delete([PASTE_STORE, key]);
+    return new Response(ctx, 500, ResponseMessages.SERVER_ERROR);
+  }
+
+  // 写入缓存（内存/线程内，供同实例快速命中）
+  await updateCache(key, metadata);
 
   return new Response(ctx, 200, ResponseMessages.SUCCESS, {
     key,
@@ -227,56 +226,34 @@ async function updateExisting(
 
   const metadata = await assembleMetadata(ctx, key, pwd);
 
-  await kv.set([PASTE_STORE, key], {
-      email: metadata.email,
-      title: metadata.title,
-      uname: metadata.uname,
-      ip: metadata.ip,
-      mime: metadata.mime,
-      len: metadata.len,
-      expire: metadata.expire,
-      hash: metadata.hash,
-      pwd,
-    });
-  await updateCache(key, metadata);
+  const newMeta = {
+    email: metadata.email,
+    title: metadata.title,
+    uname: metadata.uname,
+    ip: metadata.ip,
+    mime: metadata.mime,
+    len: metadata.len,
+    expire: metadata.expire,
+    hash: metadata.hash,
+    pwd,
+  };
 
-  queueMicrotask(async () => {
-    try {
-      const result = await repo.update(key, metadata)
-      if (!result) {
-        console.warn('Failed to update in repo, metadata:', key);
-        await updateCache(key, oldMeta);
-        await kv.set([PASTE_STORE, key], {
-          email: oldMeta.email,
-          title: oldMeta.title,
-          uname: oldMeta.uname,
-          ip: oldMeta.ip,
-          mime: oldMeta.mime,
-          len: oldMeta.len,
-          expire: oldMeta.expire,
-          hash: oldMeta.hash,
-          pwd,
-        });
-      }else {
-        delete metadata.content;
-        cacheBroadcast.postMessage({ type: "update", key, metadata });
-      }
-    } catch (err) {
-      console.error(err);
-      await updateCache(key, oldMeta); // 回滚
-      await kv.set([PASTE_STORE, key], {
-          email: oldMeta.email,
-          title: oldMeta.title,
-          uname: oldMeta.uname,
-          ip: oldMeta.ip,
-          mime: oldMeta.mime,
-          len: oldMeta.len,
-          expire: oldMeta.expire,
-          hash: oldMeta.hash,
-          pwd,
-        });
+  // 先落库（await，保证返回 200 时更新已持久化）
+  try {
+    const result = await repo.update(key, metadata);
+    if (!result) {
+      console.warn('Failed to update in repo, metadata:', key);
+      return new Response(ctx, 500, ResponseMessages.SERVER_ERROR);
     }
-  });
+  } catch (err) {
+    console.error(err);
+    return new Response(ctx, 500, ResponseMessages.SERVER_ERROR);
+  }
+
+  await kv.set([PASTE_STORE, key], newMeta);
+  await updateCache(key, metadata);
+  delete metadata.content;
+  cacheBroadcast.postMessage({ type: "update", key, metadata });
 
   return new Response(ctx, 200, ResponseMessages.SUCCESS, {
     key,
