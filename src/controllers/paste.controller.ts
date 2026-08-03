@@ -29,9 +29,9 @@ export async function getRaw(ctx: Context<AppState>) {
   const { key, pwd } = parsePathParams(ctx.params);
   const repo = await createMetadataRepository();
 
-  // 只查 meta，作用：无权限时提前返回 403/404
-  const meta = await isCached(key, pwd);
-  if (meta?.email === undefined || (meta.expire ?? 0) < getTimestamp()) {
+  // 只查 meta，作用：无权限时提前返回 403/404（KV 缓存未命中时回落到 Postgres）
+  const meta = await resolveMeta(key, pwd, repo);
+  if (!meta || (meta.expire ?? 0) < getTimestamp()) {
     throw new Response(ctx, 404, ResponseMessages.CONTENT_NOT_FOUND);
   }
   if (meta.pwd && !checkPassword(meta.pwd, pwd)) {
@@ -68,9 +68,9 @@ export async function queryRaw(ctx: Context<AppState>) {
   const { key, pwd } = parsePathParams(ctx.params);
   const repo = await createMetadataRepository();
 
-  // 只查 meta，作用：无权限时提前返回 403/404
-  const meta = await isCached(key, pwd);
-  if (meta?.email === undefined || (meta.expire ?? 0) < getTimestamp()) {
+  // 只查 meta，作用：无权限时提前返回 403/404（KV 缓存未命中时回落到 Postgres）
+  const meta = await resolveMeta(key, pwd, repo);
+  if (!meta || (meta.expire ?? 0) < getTimestamp()) {
     throw new Response(ctx, 404, ResponseMessages.CONTENT_NOT_FOUND);
   }
   if (meta.pwd && !checkPassword(meta.pwd, pwd)) {
@@ -101,7 +101,7 @@ export async function remove(ctx: Context<AppState>) {
   const { key, pwd } = parsePathParams(ctx.params);
   if (reservedPaths.has(key)) throw new Response(ctx, 403, ResponseMessages.PATH_RESERVED);
   const repo = await createMetadataRepository();
-  const meta = await isCached(key, pwd);
+  const meta = await resolveMeta(key, pwd, repo);
   if (!meta || (meta.expire ?? 0) < getTimestamp()) throw new Response(ctx, 404, ResponseMessages.CONTENT_NOT_FOUND);
   const email = ctx.state.session?.get("user")?.email;
   const isAdmin = email === EMAIL;
@@ -128,6 +128,19 @@ export async function remove(ctx: Context<AppState>) {
 }
 
 /* ─────────── 辅助私有函数 ─────────── */
+/** 读取 meta：优先 KV 缓存，未命中时回落到 Postgres（源存储） */
+async function resolveMeta(
+  key: string,
+  pwd: string,
+  repo,
+): Promise<Metadata | null> {
+  const meta = await isCached(key, pwd);
+  if (meta !== null && meta.email !== undefined) return meta;
+  const dbMeta = await repo.getByFkey(key);
+  if (!dbMeta) return null;
+  return dbMeta;
+}
+
 function getClientIp(ctx: Context<AppState>): string {
   const headers = ctx.request.headers;
   const cfIp = headers.get("cf-connecting-ip");
@@ -169,7 +182,7 @@ async function createNew(
       expire: metadata.expire,
       hash: metadata.hash,
       pwd,
-    }, { expireIn: null })
+    })
     .commit();
   if (!kvRes.ok) {
     return new Response(ctx, 409, ResponseMessages.KEY_EXISTS);

@@ -96,9 +96,9 @@ export async function checkCached(key: string, pwd?: string | undefined): Promis
 export async function getCachedContent(key: string, pwd?: string, repo): Promise<Metadata | null> {
   try {
     const cache = await checkCached(key, pwd);
-    if (cache === null) return cache;
-    if ("content" in cache) return cache;
+    if (cache && "content" in cache) return cache;
 
+    // KV 缓存未命中或仅命中 meta 时，回落到 Postgres（源存储）读取
     const dbData = await repo.getByFkey(key);
     if (!dbData) return null;
     await updateCache(key, dbData);
